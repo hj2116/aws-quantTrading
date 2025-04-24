@@ -147,6 +147,13 @@ def rebalance():
     # for t, ow, nw in zip(TICKERS, old_weights, new_weights):
     #     current_val = positions[t] * last_prices[t]
     #     diff_krw    = target_dollars[t] - current_val
+
+    #     if abs(diff_krw) < 1000:
+    #       print(f"  {t}: ⛔ Skip — Amount too small ({abs(diff_krw):,.0f} KRW)")
+    #       continue
+
+
+
     #     qty         = diff_krw / last_prices[t] if last_prices[t]>0 else 0
 
     #     action = "BUY" if qty>0 else "SELL" if qty<0 else "HOLD"
@@ -178,16 +185,16 @@ def rebalance():
 
     # print(f"[{ts}] Rebalance Done — New Cash: {cash:,.0f} KRW\n")
 
-# def commit():
-#     # ─── (5) Git 자동 커밋 & 푸시 ────────────────────────────────────────
-#     try:
-#         # 변경된 상태 파일과 로그 파일을 커밋
-#         subprocess.run(["git", "-C", TRADING_DIR, "add", STATE_FILE, LOG_FILE], check=True)
-#         subprocess.run(["git", "-C", TRADING_DIR, "commit", "-m", f"Auto update"], check=True)
-#         subprocess.run(["git", "-C", TRADING_DIR, "push"], check=True)
-#         print("Git commit & push completed")
-#     except subprocess.CalledProcessError as e:
-#         print("Git commit/push failed:", e)
+def commit():
+    # ─── (5) Git 자동 커밋 & 푸시 ────────────────────────────────────────
+    try:
+        # 변경된 상태 파일과 로그 파일을 커밋
+        subprocess.run(["git", "-C", TRADING_DIR, "add", STATE_FILE, LOG_FILE], check=True)
+        subprocess.run(["git", "-C", TRADING_DIR, "commit", "-m", f"Auto update"], check=True)
+        subprocess.run(["git", "-C", TRADING_DIR, "push"], check=True)
+        print("Git commit & push completed")
+    except subprocess.CalledProcessError as e:
+        print("Git commit/push failed:", e)
 
 if __name__ == "__main__":
     rebalance()
