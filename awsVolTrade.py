@@ -3,9 +3,14 @@ import json
 from datetime import datetime
 import zoneinfo
 import pandas as pd
-import pyupbit
+import pyupbit as upbit
 import subprocess
 from dotenv import load_dotenv
+import jwt
+import hashlib
+import requests
+import uuid
+from urllib.parse import urlencode, unquote
 
 # ─── 설정 ─────────────────────────────────────────────────────────────
 TICKERS      = ["KRW-BTC", "KRW-XRP", "KRW-MANA"]
@@ -23,7 +28,8 @@ TZ           = zoneinfo.ZoneInfo("Asia/Seoul")
 #API 접근 값 불러오기
 UPBIT_ACCESS = os.getenv("UPBIT_ACCESS_KEY")
 UPBIT_SECRET = os.getenv("UPBIT_SECRET_KEY")
-upbit = pyupbit.Upbit(UPBIT_ACCESS, UPBIT_SECRET)
+SEVER_URL = "https://api.upbit.com"
+
 
 # 작업 디렉토리 자동 생성
 os.makedirs(TRADING_DIR, exist_ok=True)
@@ -55,7 +61,18 @@ def load_state():
       "cash": 남은 현금(원)
     }
     """
-    print(upbit.get_balance("KRW"))
+    payload = {
+        'access_key': UPBIT_ACCESS,
+        'nonce': str(uuid.uuid4()),
+    }
+
+    jwt_token = jwt.encode(payload, UPBIT_SECRET)
+    authorization = 'Bearer {}'.format(jwt_token)
+    headers = {
+        'Authorization': authorization,
+    }
+    res = requests.get(SEVER_URL + '/v1/accounts', headers=headers)
+    print(res.json())
 
     # if os.path.exists(STATE_FILE):
     #     with open(STATE_FILE, 'r') as f:
