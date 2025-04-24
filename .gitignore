@@ -2,3 +2,4 @@ venv/
 *.log
 state.json
 __pycache__/
+.env
