@@ -72,7 +72,7 @@ def load_state():
         'Authorization': authorization,
     }
     res = requests.get(SEVER_URL + '/v1/accounts', headers=headers).json()
-    input_value = res['balance']
+    input_value = res[0]['balance']
     print(input_value)
 
     # if os.path.exists(STATE_FILE):
