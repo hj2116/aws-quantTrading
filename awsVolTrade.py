@@ -14,7 +14,7 @@ from urllib.parse import urlencode, unquote
 
 # ─── 설정 ─────────────────────────────────────────────────────────────
 TICKERS      = ["KRW-BTC", "KRW-XRP", "KRW-MANA"]
-INPUT_VALUE  = 10000000     # 초기 자본(원)
+input_value  = 0     # 초기 자본(원)
 DOTENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(DOTENV_PATH)
 
@@ -71,8 +71,9 @@ def load_state():
     headers = {
         'Authorization': authorization,
     }
-    res = requests.get(SEVER_URL + '/v1/accounts', headers=headers)
-    print(res.json())
+    res = requests.get(SEVER_URL + '/v1/accounts', headers=headers).json()
+    input_value = res['balance']
+    print(input_value)
 
     # if os.path.exists(STATE_FILE):
     #     with open(STATE_FILE, 'r') as f:
