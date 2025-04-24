@@ -45,14 +45,17 @@ def load_state():
     """
     state.json 구조:
     {
-      "positions": {"KRW-BTC": qty, "KRW-XRP": qty, ...},
+      "positions": {"KRW-BTC": qty, ...},
       "cash": 남은 현금(원)
     }
     """
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, 'r') as f:
-            return json.load(f)
-    # 최초 실행 시: 현금만 보유, 포지션 0
+            data = json.load(f)
+        # if old schema without positions, reinitialize
+        if "positions" in data and "cash" in data:
+            return data
+    # 최초 실행 시 또는 schema mismatch: 현금만 보유, 포지션 0
     return {
         "positions": {t: 0.0 for t in TICKERS},
         "cash": INPUT_VALUE
