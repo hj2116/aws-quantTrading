@@ -153,4 +153,4 @@ def rebalance():
 
 if __name__ == "__main__":
     rebalance()
-    commit()
+    # commit()
