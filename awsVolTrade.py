@@ -140,16 +140,16 @@ def rebalance():
 
     print(f"[{ts}] Rebalance Done — New Cash: {cash:,.0f} KRW\n")
 
-def commit():
-    # ─── (5) Git 자동 커밋 & 푸시 ────────────────────────────────────────
-    try:
-        # 변경된 상태 파일과 로그 파일을 커밋
-        subprocess.run(["git", "-C", TRADING_DIR, "add", STATE_FILE, LOG_FILE], check=True)
-        subprocess.run(["git", "-C", TRADING_DIR, "commit", "-m", f"Auto update"], check=True)
-        subprocess.run(["git", "-C", TRADING_DIR, "push"], check=True)
-        print("Git commit & push completed")
-    except subprocess.CalledProcessError as e:
-        print("Git commit/push failed:", e)
+# def commit():
+#     # ─── (5) Git 자동 커밋 & 푸시 ────────────────────────────────────────
+#     try:
+#         # 변경된 상태 파일과 로그 파일을 커밋
+#         subprocess.run(["git", "-C", TRADING_DIR, "add", STATE_FILE, LOG_FILE], check=True)
+#         subprocess.run(["git", "-C", TRADING_DIR, "commit", "-m", f"Auto update"], check=True)
+#         subprocess.run(["git", "-C", TRADING_DIR, "push"], check=True)
+#         print("Git commit & push completed")
+#     except subprocess.CalledProcessError as e:
+#         print("Git commit/push failed:", e)
 
 if __name__ == "__main__":
     rebalance()
