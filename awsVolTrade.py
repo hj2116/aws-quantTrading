@@ -11,6 +11,7 @@ import hashlib
 import requests
 import uuid
 from urllib.parse import urlencode, unquote
+from collections import defaultdict
 
 # ─── 설정 ─────────────────────────────────────────────────────────────
 TICKERS      = ["KRW-BTC", "KRW-XRP", "KRW-MANA"]
@@ -72,8 +73,20 @@ def load_state():
         'Authorization': authorization,
     }
     res = requests.get(SEVER_URL + '/v1/accounts', headers=headers).json()
-    input_value = res[0]['balance']
-    print(input_value)
+    
+    wallet = defaultdict()
+
+    for i in range(len(res)):
+        if(res[i]["currency"]=="KRW"):
+            wallet["KRW"] = res[i]["balance"]
+        elif(res[i]["currency"]=="BTC"):
+            wallet["KRW-BTC"] = res[i]["balance"]
+        elif(res[i]["currency"]=="XRP"):
+            wallet["KRW-XRP"] = res[i]["balance"]
+        elif(res[i]["currency"]=="SOL"):
+            wallet["KRW-MANA"] = res[i]["balance"]
+
+    print(wallet)    
 
     # if os.path.exists(STATE_FILE):
     #     with open(STATE_FILE, 'r') as f:
