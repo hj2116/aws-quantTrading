@@ -78,13 +78,13 @@ def load_state():
 
     for i in range(len(res)):
         if(res[i]["currency"]=="KRW"):
-            wallet["KRW"] = res[i]["balance"]
+            wallet["KRW"] = int(res[i]["balance"])
         elif(res[i]["currency"]=="BTC"):
-            wallet["KRW-BTC"] = res[i]["balance"]
+            wallet["KRW-BTC"] = int(res[i]["balance"])
         elif(res[i]["currency"]=="XRP"):
-            wallet["KRW-XRP"] = res[i]["balance"]
+            wallet["KRW-XRP"] = int(res[i]["balance"])
         elif(res[i]["currency"]=="SOL"):
-            wallet["KRW-MANA"] = res[i]["balance"]
+            wallet["KRW-MANA"] = int(res[i]["balance"])
 
     print(wallet)    
 
