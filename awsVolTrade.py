@@ -1,53 +1,87 @@
 import os
 import json
-from datetime import datetime
-import zoneinfo
+import time
+import math
+import hashlib
+import uuid
+import requests
 import pandas as pd
 import pyupbit as upbit
-import subprocess
-from dotenv import load_dotenv
-import jwt
-import hashlib
-import requests
-import uuid
+import zoneinfo
+from datetime import datetime
 from urllib.parse import urlencode, unquote
 from collections import defaultdict
-import math
+from dotenv import load_dotenv
+import jwt
 
 # ─── 설정 ─────────────────────────────────────────────────────────────
 TICKERS      = ["KRW-BTC", "KRW-XRP", "KRW-MANA"]
-input_value  = 0     # 초기 자본(원)
-DOTENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
-load_dotenv(DOTENV_PATH)
+MIN_ORDER    = 5000          # 최소 주문 금액(원)
+FEE_RATE     = 0.0005        # 수수료율 0.05%
 
-# 홈 디렉토리 기준 작업 경로 설정
 HOME_DIR     = os.path.expanduser("~")
 TRADING_DIR  = os.path.join(HOME_DIR, "trading")
 STATE_FILE   = os.path.join(TRADING_DIR, "state.json")
 LOG_FILE     = os.path.join(TRADING_DIR, "rebalancing_log.csv")
-
 TZ           = zoneinfo.ZoneInfo("Asia/Seoul")
+os.makedirs(TRADING_DIR, exist_ok=True)
 
-# ─── 주문 수량 단위 설정 ──────────────────────────────────────────────
+# .env 로드
+DOTENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
+load_dotenv(DOTENV_PATH)
+UPBIT_ACCESS  = os.getenv("UPBIT_ACCESS_KEY")
+UPBIT_SECRET  = os.getenv("UPBIT_SECRET_KEY")
+SERVER_URL    = os.getenv("UPBIT_OPEN_API_SERVER_URL", "https://api.upbit.com")
+
+# 주문 수량 단위 설정
 ORDER_UNITS = {
     "BTC": 0.000001,
     "XRP": 0.1,
     "MANA": 0.1
 }
 
-#API 접근 값 불러오기
-UPBIT_ACCESS = os.getenv("UPBIT_ACCESS_KEY")
-UPBIT_SECRET = os.getenv("UPBIT_SECRET_KEY")
-SEVER_URL = "https://api.upbit.com"
+# ─── Upbit 주문 헬퍼 ────────────────────────────────────────────────────
+def place_order(params: dict) -> dict:
+    query_string = unquote(urlencode(params, doseq=True)).encode("utf-8")
+    m = hashlib.sha512()
+    m.update(query_string)
+    query_hash = m.hexdigest()
 
+    payload = {
+        'access_key': UPBIT_ACCESS,
+        'nonce': str(uuid.uuid4()),
+        'query_hash': query_hash,
+        'query_hash_alg': 'SHA512',
+    }
+    jwt_token = jwt.encode(payload, UPBIT_SECRET, algorithm="HS256")
+    headers = {'Authorization': f'Bearer {jwt_token}'}
+    response = requests.post(f"{SERVER_URL}/v1/orders", json=params, headers=headers)
+    return response.json()
 
-# 작업 디렉토리 자동 생성
-os.makedirs(TRADING_DIR, exist_ok=True)
+def get_order_status(order_id: str) -> dict:
+    params = {
+        'uuids[]': [order_id],
+        'states[]': ['done', 'cancel']
+    }
+    query_string = unquote(urlencode(params, doseq=True)).encode("utf-8")
+    m = hashlib.sha512()
+    m.update(query_string)
+    query_hash = m.hexdigest()
 
+    payload = {
+        'access_key': UPBIT_ACCESS,
+        'nonce': str(uuid.uuid4()),
+        'query_hash': query_hash,
+        'query_hash_alg': 'SHA512',
+    }
+    jwt_token = jwt.encode(payload, UPBIT_SECRET, algorithm="HS256")
+    headers = {'Authorization': f'Bearer {jwt_token}'}
+    resp = requests.get(f"{SERVER_URL}/v1/orders", params=params, headers=headers)
+    data = resp.json()
+    return data[0] if isinstance(data, list) and data else {}
+
+# ─── Tick price 조정 ───────────────────────────────────────────────────
 def get_tick_price(price: float) -> float:
-
-    #Upbit KRW 마켓의 호가 단위에 맞춰 버림
-
     steps = [
         (2_000_000,    1_000),
         (1_000_000,      500),
@@ -66,216 +100,173 @@ def get_tick_price(price: float) -> float:
     for threshold, tick in steps:
         if price >= threshold:
             return (price // tick) * tick
-    # price < 0.0001 KRW
     return math.floor(price / 0.00000001) * 0.00000001
 
-
-# ─── (1) 과거 데이터 불러오기 ───────────────────────────────────────────
-def get_data(ticker, count=21):
-    return upbit.get_ohlcv(ticker, count=count, interval="day")
-
-# ─── (2) 변동성 역수 가중치 계산 ────────────────────────────────────────
+# ─── 과거 21일 일봉 데이터 ────────────────────────────────────────────
 def calculate_weight(tickers):
     inv_vols = []
     for t in tickers:
-        df = get_data(t)
-        df = df.drop(['open','high','low','volume','value'], axis=1)
+        df = upbit.get_ohlcv(t, count=21, interval="day")
         df['pct_change'] = df['close'].pct_change()
-        df['vol20']      = df['pct_change'].rolling(20).std()
-        vol  = df['vol20'].iloc[-1]
-        inv  = 1/vol if pd.notna(vol) and vol>0 else 0
-        inv_vols.append(inv)
+        vol = df['pct_change'].rolling(20).std().iloc[-1]
+        inv_vols.append(1/vol if pd.notna(vol) and vol>0 else 0)
     total = sum(inv_vols)
-    return [inv/total if total>0 else 0 for inv in inv_vols]
+    return [v/total if total>0 else 0 for v in inv_vols]
 
-# ─── (3) 상태 로드 / 저장 ─────────────────────────────────────────────
+# ─── 잔고 조회 ────────────────────────────────────────────────────────
 def load_state():
-    
+    # get balances via API
+    query_string = b''
     payload = {
         'access_key': UPBIT_ACCESS,
         'nonce': str(uuid.uuid4()),
+        'query_hash_alg': 'SHA512',
     }
-
-    jwt_token = jwt.encode(payload, UPBIT_SECRET)
-    authorization = 'Bearer {}'.format(jwt_token)
-    headers = {
-        'Authorization': authorization,
-    }
-    res = requests.get(SEVER_URL + '/v1/accounts', headers=headers).json()
-    
-    wallet = defaultdict()
-
-    for i in range(len(res)):
-        if(res[i]["currency"]=="KRW"):
-            wallet["KRW"] = int(res[i]["balance"])
-        elif(res[i]["currency"]=="BTC"):
-            wallet["KRW-BTC"] = int(res[i]["balance"])
-        elif(res[i]["currency"]=="XRP"):
-            wallet["KRW-XRP"] = int(res[i]["balance"])
-        elif(res[i]["currency"]=="SOL"):
-            wallet["KRW-MANA"] = int(res[i]["balance"])
-    return wallet
-
+    jwt_token = jwt.encode(payload, UPBIT_SECRET, algorithm="HS256")
+    headers = {'Authorization': f'Bearer {jwt_token}'}
+    res = requests.get(f"{SERVER_URL}/v1/accounts", headers=headers).json()
+    balances = defaultdict(float)
+    for acc in res:
+        currency = acc.get("currency")
+        bal = float(acc.get("balance",0))
+        if currency == "KRW":
+            balances["KRW"] = bal
+        else:
+            balances[f"KRW-{currency}"] = bal
+    return balances
 
 def save_state(state):
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f, indent=2)
 
-# ─── (4) 리밸런싱 & 로그 저장 ──────────────────────────────────────────
+# ─── 리밸런싱 ─────────────────────────────────────────────────────────
 def rebalance():
-    
     state = load_state()
-    # 현재 보유 수량 및 현금 불러오기
+
     quantities = {t.split('-',1)[1]: state.get(t, 0.0) for t in TICKERS}
     cash = state.get("KRW", 0.0)
-    cash = 100000
 
-    # 실시간 가격 조회 및 포트폴리오 가치 계산
+    # fetch real time prices and portfolio value
     prices = {t: upbit.get_current_price(t) for t in TICKERS}
-    portfolio_value = cash + sum(quantities[t.split('-',1)[1]] * prices[t] for t in TICKERS)
+    portfolio_value = cash + sum(quantities[a] * prices[f"KRW-{a}"] for a in quantities)
 
-    # 신규 비중 계산
-    new_weights_list = calculate_weight(TICKERS)
-    new_weights = dict(zip(TICKERS, new_weights_list))
+    # compute new weights
+    new_weights = dict(zip(TICKERS, calculate_weight(TICKERS)))
 
     now = datetime.now(TZ)
     ts = now.strftime("%Y-%m-%d %H:%M:%S")
     records = []
 
-    # 최소 주문 금액 (Upbit 기준 5000원, 필요시 조정)
-    MIN_ORDER = 5000
-
     print(f"[{ts}] Rebalance Start — PV: {portfolio_value:,.0f} KRW, Cash: {cash:,.0f} KRW")
 
-    # 0.05% 수수료 설정
-    FEE_RATE = 0.0005
-
-    # 매도와 매수 주문을 분리 처리하기 위한 리스트
+    # compute actions
     actions = []
-
     for t in TICKERS:
         asset = t.split('-',1)[1]
         price = get_tick_price(prices[t])
-        prev_qty = quantities.get(asset, 0.0)
-        prev_val = prev_qty * price
+        prev_val = quantities.get(asset, 0.0) * price
         target_val = portfolio_value * new_weights[t]
         diff_krw = target_val - prev_val
 
-        # 최소 주문 금액 미만 스킵
         if abs(diff_krw) < MIN_ORDER:
-            print(f"  {t}: Skip — {abs(diff_krw):,.0f} KRW < {MIN_ORDER:,} KRW")
+            print(f"  {t}: Skip — {abs(diff_krw):,.0f} KRW < {MIN_ORDER:,}")
             continue
 
-        if diff_krw > 0:
-            # 매수: 순수 투자금(diff_krw)과 수수료를 포함해 전체 지출이 cash를 넘지 않도록 조정
-            # gross_krw: 실제 구매금액
-            gross_krw = diff_krw / (1 + FEE_RATE)
-            diff_qty = gross_krw / price
-
-            # 주문 수량 단위에 맞춰 내림
-            unit = ORDER_UNITS.get(asset)
-            if unit and diff_qty != 0:
-                diff_qty = math.floor(diff_qty / unit) * unit
-
-            action = "BUY"
-            fee = gross_krw * FEE_RATE
-        else:
-            # 매도: 순수 회수금 확보를 위해
-            gross_net = -diff_krw
-            gross_krw = gross_net / (1 - FEE_RATE)
-            diff_qty = - (gross_krw / price)
-
-            # 주문 수량 단위에 맞춰 내림
-            unit = ORDER_UNITS.get(asset)
-            if unit and diff_qty != 0:
-                diff_qty = math.floor(abs(diff_qty) / unit) * unit * (-1 if diff_qty < 0 else 1)
-
-            action = "SELL"
-            fee = gross_krw * FEE_RATE
+        qty = diff_krw / price
+        # truncate to unit
+        unit = ORDER_UNITS.get(asset)
+        if unit:
+            qty = math.floor(abs(qty)/unit)*unit * (1 if qty>0 else -1)
 
         actions.append({
             "ticker": t,
             "asset": asset,
-            "action": action,
-            "price": price,
-            "diff_qty": diff_qty,
-            "diff_krw": diff_krw,
-            "fee": fee
+            "diff_qty": qty,
+            "diff_krw": diff_krw
         })
 
-    # SELL 먼저 실행
+    # execute SELL first
+    sell_ids = []
     for act in actions:
-        if act["action"] != "SELL":
-            continue
-        t = act["ticker"]; asset = act["asset"]
-        diff_qty = act["diff_qty"]; price = act["price"]
-        diff_krw = act["diff_krw"]; fee = act["fee"]
+        if act["diff_qty"] < 0:
+            t = act["ticker"]; asset = act["asset"]; qty = abs(act["diff_qty"])
+            params = {"market": t, "side": "ask", "ord_type": "market", "volume": str(qty)}
+            resp = place_order(params)
+            oid = resp.get("uuid")
+            print(f"  {t}: SELL order submitted, uuid={oid}")
+            if oid: sell_ids.append(oid)
 
-        quantities[asset] += diff_qty
-        cash += -diff_krw  # 순회수금만 현금에 반영
+    # wait for sell completion
+    for oid in sell_ids:
+        while True:
+            status = get_order_status(oid)
+            state_s = status.get("state")
+            if state_s in ("done","cancel"):
+                print(f"  SELL {oid} {state_s}")
+                break
+            time.sleep(1)
 
-        print(f"  {t}: SELL {abs(diff_qty):.6f} units @ {price:,.0f} KRW ({diff_krw:,.0f} KRW) Fee: {fee:,.0f} KRW")
+    # record sell results
+    for oid in sell_ids:
+        status = get_order_status(oid)
+        t = status.get("market"); asset = t.split('-',1)[1]
+        executed = float(status.get("executed_volume",0))
+        fee = float(status.get("paid_fee",0))
+        price = float(status.get("price",0))
+        quantities[asset] -= executed
+        cash += executed * price - fee
         records.append({
-            "timestamp": ts,
-            "ticker": t,
-            "action": "SELL",
-            "price": price,
-            "qty": round(diff_qty, 6),
-            "fee": round(fee, 0),
-            "cash_after": round(cash, 0),
-            "pv": round(portfolio_value, 0)
+            "timestamp": ts, "ticker": t, "action": "SELL",
+            "price": price, "qty": executed, "fee": fee,
+            "cash_after": cash, "pv": portfolio_value
         })
 
-    # BUY 다음 실행
+    # execute BUY
     for act in actions:
-        if act["action"] != "BUY":
-            continue
-        t = act["ticker"]; asset = act["asset"]
-        diff_qty = act["diff_qty"]; price = act["price"]
-        diff_krw = act["diff_krw"]; fee = act["fee"]
+        if act["diff_qty"] > 0:
+            t = act["ticker"]; asset = act["asset"]; qty = act["diff_qty"]
+            max_gross = cash/(1+FEE_RATE)
+            max_qty = math.floor(max_gross/get_tick_price(prices[t])/ORDER_UNITS[asset])*ORDER_UNITS[asset]
+            if qty > max_qty:
+                print(f"  ⚠️ BUY capped {qty:.6f} → {max_qty:.6f}")
+                qty = max_qty
+            if qty <= 0:
+                continue
+            spend = qty * get_tick_price(prices[t])
+            params = {"market": t, "side": "bid", "ord_type": "market", "price": str(int(spend))}
+            resp = place_order(params)
+            oid = resp.get("uuid")
+            print(f"  {t}: BUY order submitted, uuid={oid}")
+            if not oid: continue
+            # wait fill
+            while True:
+                status = get_order_status(oid)
+                state_s = status.get("state")
+                if state_s in ("done","cancel"):
+                    print(f"  BUY {oid} {state_s}")
+                    break
+                time.sleep(1)
+            # record buy results
+            status = get_order_status(oid)
+            executed = float(status.get("executed_volume",0))
+            fee = float(status.get("paid_fee",0))
+            price = float(status.get("price",0))
+            quantities[asset] += executed
+            cash -= executed * price + fee
+            records.append({
+                "timestamp": ts, "ticker": t, "action": "BUY",
+                "price": price, "qty": executed, "fee": fee,
+                "cash_after": cash, "pv": portfolio_value
+            })
 
-        # BUY: 실제로는 gross_krw + fee 만큼 현금 차감
-        gross_krw = diff_krw / (1 + FEE_RATE)
-        quantities[asset] += diff_qty
-        cash -= (gross_krw + fee)  # 총 지출 반영 (구매금액 + 수수료)
-
-        print(f"  {t}: BUY {abs(diff_qty):.6f} units @ {price:,.0f} KRW ({diff_krw:,.0f} KRW) Fee: {fee:,.0f} KRW")
-        records.append({
-            "timestamp": ts,
-            "ticker": t,
-            "action": "BUY",
-            "price": price,
-            "qty": round(diff_qty, 6),
-            "fee": round(fee, 0),
-            "cash_after": round(cash, 0),
-            "pv": round(portfolio_value, 0)
-        })
-
-    # 로그 저장
+    # save logs
     df = pd.DataFrame(records)
     df.to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE), index=False)
 
-    # 상태 업데이트 및 저장
-    for t in TICKERS:
-        asset = t.split('-',1)[1]
-        state[t] = quantities.get(asset, 0.0)
-    state["KRW"] = cash
-    save_state(state)
+    # optionally git commit
+    # subprocess.run([...])
 
-    print(f"[{ts}] Rebalance Done — New Cash: {cash:,.0f} KRW\n")
-    
-
-def commit():
-    # ─── (5) Git 자동 커밋 & 푸시 ────────────────────────────────────────
-    try:
-        # 변경된 상태 파일과 로그 파일을 커밋
-        subprocess.run(["git", "-C", TRADING_DIR, "add", STATE_FILE, LOG_FILE], check=True)
-        subprocess.run(["git", "-C", TRADING_DIR, "commit", "-m", f"Auto update"], check=True)
-        subprocess.run(["git", "-C", TRADING_DIR, "push"], check=True)
-        print("Git commit & push completed")
-    except subprocess.CalledProcessError as e:
-        print("Git commit/push failed:", e)
+    print(f"[{ts}] Rebalance Done — Cash: {cash:,.0f} KRW")
 
 if __name__ == "__main__":
     rebalance()
-    # commit()
