@@ -56,7 +56,7 @@ def place_order(params: dict) -> dict:
     jwt_token = jwt.encode(payload, UPBIT_SECRET, algorithm="HS256")
     headers = {'Authorization': f'Bearer {jwt_token}'}
     response = requests.post(f"{SERVER_URL}/v1/orders", json=params, headers=headers)
-    if response.status_code != 200:
+    if response.status_code != 201:
         ts = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
         print(f"{ts} | place_order ERROR | status={response.status_code} | response={response.text}")
     return response.json()
@@ -196,7 +196,7 @@ def rebalance():
     for act in actions:
         if act["diff_qty"] < 0:
             t = act["ticker"]; asset = act["asset"]; qty = abs(act["diff_qty"])
-            params = {"market": t, "side": "ask", "ord_type": "market", "volume": str(qty)}
+            params = {"market": t, "side": "ask", "ord_type": "price", "volume": str(qty)}
             resp = place_order(params)
             oid = resp.get("uuid")
             print(f"  {t}: SELL order submitted, uuid={oid}")
@@ -239,7 +239,7 @@ def rebalance():
             if qty <= 0:
                 continue
             spend = qty * get_tick_price(prices[t])
-            params = {"market": t, "side": "bid", "ord_type": "market", "price": str(int(spend))}
+            params = {"market": t, "side": "bid", "ord_type": "price", "price": str(int(spend))}
             resp = place_order(params)
             oid = resp.get("uuid")
             print(f"  {t}: BUY order submitted, uuid={oid}")
