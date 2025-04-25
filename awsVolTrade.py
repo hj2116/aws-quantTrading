@@ -56,6 +56,9 @@ def place_order(params: dict) -> dict:
     jwt_token = jwt.encode(payload, UPBIT_SECRET, algorithm="HS256")
     headers = {'Authorization': f'Bearer {jwt_token}'}
     response = requests.post(f"{SERVER_URL}/v1/orders", json=params, headers=headers)
+    if response.status_code != 200:
+        ts = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"{ts} | place_order ERROR | status={response.status_code} | response={response.text}")
     return response.json()
 
 def get_order_status(order_id: str) -> dict:
@@ -77,6 +80,9 @@ def get_order_status(order_id: str) -> dict:
     jwt_token = jwt.encode(payload, UPBIT_SECRET, algorithm="HS256")
     headers = {'Authorization': f'Bearer {jwt_token}'}
     resp = requests.get(f"{SERVER_URL}/v1/orders", params=params, headers=headers)
+    if resp.status_code != 200:
+        ts = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"{ts} | get_order_status ERROR | status={resp.status_code} | response={resp.text}")
     data = resp.json()
     return data[0] if isinstance(data, list) and data else {}
 
