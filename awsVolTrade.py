@@ -35,6 +35,28 @@ SEVER_URL = "https://api.upbit.com"
 # 작업 디렉토리 자동 생성
 os.makedirs(TRADING_DIR, exist_ok=True)
 
+def get_tick_price(price: float) -> float:
+
+    #Upbit KRW 마켓의 호가 단위에 맞춰 버림.
+
+    steps = [
+        (2000000, 1000),
+        (1000_000,   500),
+        (  500000,   100),
+        (  100000,    50),
+        (   10000,    10),
+        (    1000,     1),
+        (      100,   0.1),
+        (       10,  0.01),
+        (        1, 0.001),
+        (      0.1,0.0001),
+    ]
+    for threshold, tick in steps:
+        if price >= threshold:
+            return (price // tick) * tick
+    return price
+
+
 # ─── (1) 과거 데이터 불러오기 ───────────────────────────────────────────
 def get_data(ticker, count=21):
     return upbit.get_ohlcv(ticker, count=count, interval="day")
@@ -85,20 +107,8 @@ def load_state():
             wallet["KRW-XRP"] = int(res[i]["balance"])
         elif(res[i]["currency"]=="SOL"):
             wallet["KRW-MANA"] = int(res[i]["balance"])
+    return wallet
 
-    print(wallet)    
-
-    # if os.path.exists(STATE_FILE):
-    #     with open(STATE_FILE, 'r') as f:
-    #         data = json.load(f)
-    #     # if old schema without positions, reinitialize
-    #     if "positions" in data and "cash" in data:
-    #         return data
-    # # 최초 실행 시 또는 schema mismatch: 현금만 보유, 포지션 0
-    # return {
-    #     "positions": {t: 0.0 for t in TICKERS},
-    #     "cash": INPUT_VALUE
-    # }
 
 def save_state(state):
     with open(STATE_FILE, 'w') as f:
@@ -106,84 +116,132 @@ def save_state(state):
 
 # ─── (4) 리밸런싱 & 로그 저장 ──────────────────────────────────────────
 def rebalance():
-    load_state()
-    # positions    = state["positions"]
-    # cash         = state["cash"]
-    # # 이전 포지션 가치 실시간 체결가로 계산
-    # old_weights = []
-    # for t in TICKERS:
-    #     price = upbit.get_current_price(t)
-    #     value = positions.get(t, 0) * price
-    #     old_weights.append(value)
-    # # 포트폴리오 가치 계산
-    # last_prices = {}
-    # for t in TICKERS:
-    #     last_prices[t] = upbit.get_current_price(t)
+    
+    state = load_state()
+    # 현재 보유 수량 및 현금 불러오기
+    quantities = {t.split('-',1)[1]: state.get(t, 0.0) for t in TICKERS}
+    cash = state.get("KRW", 0.0)
+    cash = 500000
 
-    # pv = cash
-    # for t in TICKERS:
-    #     pv += positions[t] * last_prices[t]
-    # # 실제 old_weights 비율
-    # temp_weights = []
-    # if pv > 0:
-    #     for t in TICKERS:
-    #         temp_weights.append((positions[t] * last_prices[t]) / pv)
-    # else:
-    #     for t in TICKERS:
-    #         temp_weights.append(0)
-    # old_weights = temp_weights
+    # 실시간 가격 조회 및 포트폴리오 가치 계산
+    prices = {t: upbit.get_current_price(t) for t in TICKERS}
+    portfolio_value = cash + sum(quantities[t.split('-',1)[1]] * prices[t] for t in TICKERS)
 
-    # # 새 가중치 및 목표 달러 배분
-    # new_weights   = calculate_weight(TICKERS)
-    # target_dollars = {}
-    # for t, w in zip(TICKERS, new_weights):
-    #     target_dollars[t] = pv * w
+    # 신규 비중 계산
+    new_weights_list = calculate_weight(TICKERS)
+    new_weights = dict(zip(TICKERS, new_weights_list))
 
-    # now  = datetime.now(TZ)
-    # ts   = now.strftime("%Y-%m-%d %H:%M:%S")
-    # records = []
+    now = datetime.now(TZ)
+    ts = now.strftime("%Y-%m-%d %H:%M:%S")
+    records = []
 
-    # print(f"[{ts}] Rebalance Start — PV: {pv:,.0f} KRW  Cash: {cash:,.0f} KRW")
-    # for t, ow, nw in zip(TICKERS, old_weights, new_weights):
-    #     current_val = positions[t] * last_prices[t]
-    #     diff_krw    = target_dollars[t] - current_val
+    # 최소 주문 금액 (Upbit 기준 5000원, 필요시 조정)
+    MIN_ORDER = 5000
 
-    #     if abs(diff_krw) < 1000:
-    #       print(f"  {t}: ⛔ Skip — Amount too small ({abs(diff_krw):,.0f} KRW)")
-    #       continue
+    print(f"[{ts}] Rebalance Start — PV: {portfolio_value:,.0f} KRW, Cash: {cash:,.0f} KRW")
 
+    # 0.05% 수수료 설정
+    FEE_RATE = 0.0005
 
+    # 매도와 매수 주문을 분리 처리하기 위한 리스트
+    actions = []
 
-    #     qty         = diff_krw / last_prices[t] if last_prices[t]>0 else 0
+    for t in TICKERS:
+        asset = t.split('-',1)[1]
+        price = get_tick_price(prices[t])
+        prev_qty = quantities.get(asset, 0.0)
+        prev_val = prev_qty * price
+        target_val = portfolio_value * new_weights[t]
+        diff_krw = target_val - prev_val
 
-    #     action = "BUY" if qty>0 else "SELL" if qty<0 else "HOLD"
-    #     # 상태 업데이트
-    #     positions[t] += qty
-    #     cash        -= qty * last_prices[t]
+        # 최소 주문 금액 미만 스킵
+        if abs(diff_krw) < MIN_ORDER:
+            print(f"  {t}: Skip — {abs(diff_krw):,.0f} KRW < {MIN_ORDER:,} KRW")
+            continue
 
-    #     print(f"  {t}: {action} {abs(qty):.6f} units @ {last_prices[t]:,.0f} KRW")
+        if diff_krw > 0:
+            # 매수: 순수 투자금 확보를 위해
+            gross_krw = diff_krw / (1 - FEE_RATE)
+            diff_qty = gross_krw / price
+            action = "BUY"
+            fee = gross_krw * FEE_RATE
+        else:
+            # 매도: 순수 회수금 확보를 위해
+            gross_net = -diff_krw
+            gross_krw = gross_net / (1 - FEE_RATE)
+            diff_qty = - (gross_krw / price)
+            action = "SELL"
+            fee = gross_krw * FEE_RATE
 
-    #     records.append({
-    #         "timestamp":    ts,
-    #         "ticker":       t,
-    #         "action":       action,
-    #         "price":        float(last_prices[t]),
-    #         "qty":          float(qty),
-    #         "cash_after":   float(cash),
-    #         "portfolio_value": float(pv)
-    #     })
+        actions.append({
+            "ticker": t,
+            "asset": asset,
+            "action": action,
+            "price": price,
+            "diff_qty": diff_qty,
+            "diff_krw": diff_krw,
+            "fee": fee
+        })
 
-    # # 로그 CSV에 누적 저장
-    # df = pd.DataFrame(records)
-    # header = not os.path.exists(LOG_FILE)
-    # df.to_csv(LOG_FILE, mode='a', header=header, index=False)
+    # SELL 먼저 실행
+    for act in actions:
+        if act["action"] != "SELL":
+            continue
+        t = act["ticker"]; asset = act["asset"]
+        diff_qty = act["diff_qty"]; price = act["price"]
+        diff_krw = act["diff_krw"]; fee = act["fee"]
 
-    # # 상태 저장
-    # state["positions"] = positions
-    # state["cash"]      = cash
-    # save_state(state)
+        quantities[asset] += diff_qty
+        cash += -diff_krw  # 순회수금만 현금에 반영
 
-    # print(f"[{ts}] Rebalance Done — New Cash: {cash:,.0f} KRW\n")
+        print(f"  {t}: SELL {abs(diff_qty):.6f} units @ {price:,.0f} KRW ({diff_krw:,.0f} KRW) Fee: {fee:,.0f} KRW")
+        records.append({
+            "timestamp": ts,
+            "ticker": t,
+            "action": "SELL",
+            "price": price,
+            "qty": round(diff_qty, 6),
+            "fee": round(fee, 0),
+            "cash_after": round(cash, 0),
+            "pv": round(portfolio_value, 0)
+        })
+
+    # BUY 다음 실행
+    for act in actions:
+        if act["action"] != "BUY":
+            continue
+        t = act["ticker"]; asset = act["asset"]
+        diff_qty = act["diff_qty"]; price = act["price"]
+        diff_krw = act["diff_krw"]; fee = act["fee"]
+
+        quantities[asset] += diff_qty
+        cash -= (diff_krw / (1 - FEE_RATE))  # 총 지출 반영
+
+        print(f"  {t}: BUY {abs(diff_qty):.6f} units @ {price:,.0f} KRW ({diff_krw:,.0f} KRW) Fee: {fee:,.0f} KRW")
+        records.append({
+            "timestamp": ts,
+            "ticker": t,
+            "action": "BUY",
+            "price": price,
+            "qty": round(diff_qty, 6),
+            "fee": round(fee, 0),
+            "cash_after": round(cash, 0),
+            "pv": round(portfolio_value, 0)
+        })
+
+    # 로그 저장
+    df = pd.DataFrame(records)
+    df.to_csv(LOG_FILE, mode='a', header=not os.path.exists(LOG_FILE), index=False)
+
+    # 상태 업데이트 및 저장
+    for t in TICKERS:
+        asset = t.split('-',1)[1]
+        state[t] = quantities.get(asset, 0.0)
+    state["KRW"] = cash
+    save_state(state)
+
+    print(f"[{ts}] Rebalance Done — New Cash: {cash:,.0f} KRW\n")
+    
 
 def commit():
     # ─── (5) Git 자동 커밋 & 푸시 ────────────────────────────────────────
