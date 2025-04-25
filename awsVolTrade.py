@@ -12,6 +12,7 @@ import requests
 import uuid
 from urllib.parse import urlencode, unquote
 from collections import defaultdict
+import math
 
 # ─── 설정 ─────────────────────────────────────────────────────────────
 TICKERS      = ["KRW-BTC", "KRW-XRP", "KRW-MANA"]
@@ -24,7 +25,15 @@ HOME_DIR     = os.path.expanduser("~")
 TRADING_DIR  = os.path.join(HOME_DIR, "trading")
 STATE_FILE   = os.path.join(TRADING_DIR, "state.json")
 LOG_FILE     = os.path.join(TRADING_DIR, "rebalancing_log.csv")
+
 TZ           = zoneinfo.ZoneInfo("Asia/Seoul")
+
+# ─── 주문 수량 단위 설정 ──────────────────────────────────────────────
+ORDER_UNITS = {
+    "BTC": 0.000001,
+    "XRP": 0.1,
+    "MANA": 0.1
+}
 
 #API 접근 값 불러오기
 UPBIT_ACCESS = os.getenv("UPBIT_ACCESS_KEY")
@@ -37,24 +46,28 @@ os.makedirs(TRADING_DIR, exist_ok=True)
 
 def get_tick_price(price: float) -> float:
 
-    #Upbit KRW 마켓의 호가 단위에 맞춰 버림.
+    #Upbit KRW 마켓의 호가 단위에 맞춰 버림
 
     steps = [
-        (2000000, 1000),
-        (1000_000,   500),
-        (  500000,   100),
-        (  100000,    50),
-        (   10000,    10),
-        (    1000,     1),
-        (      100,   0.1),
-        (       10,  0.01),
-        (        1, 0.001),
-        (      0.1,0.0001),
+        (2_000_000,    1_000),
+        (1_000_000,      500),
+        (   500_000,      100),
+        (   100_000,       50),
+        (    10_000,       10),
+        (     1_000,        1),
+        (       100,      0.1),
+        (        10,     0.01),
+        (         1,    0.001),
+        (       0.1,   0.0001),
+        (      0.01,  0.00001),
+        (     0.001, 0.000001),
+        (    0.0001,0.0000001),
     ]
     for threshold, tick in steps:
         if price >= threshold:
             return (price // tick) * tick
-    return price
+    # price < 0.0001 KRW
+    return math.floor(price / 0.00000001) * 0.00000001
 
 
 # ─── (1) 과거 데이터 불러오기 ───────────────────────────────────────────
@@ -77,13 +90,7 @@ def calculate_weight(tickers):
 
 # ─── (3) 상태 로드 / 저장 ─────────────────────────────────────────────
 def load_state():
-    """
-    state.json 구조:
-    {
-      "positions": {"KRW-BTC": qty, ...},
-      "cash": 남은 현금(원)
-    }
-    """
+    
     payload = {
         'access_key': UPBIT_ACCESS,
         'nonce': str(uuid.uuid4()),
@@ -121,7 +128,6 @@ def rebalance():
     # 현재 보유 수량 및 현금 불러오기
     quantities = {t.split('-',1)[1]: state.get(t, 0.0) for t in TICKERS}
     cash = state.get("KRW", 0.0)
-    cash = 500000
 
     # 실시간 가격 조회 및 포트폴리오 가치 계산
     prices = {t: upbit.get_current_price(t) for t in TICKERS}
@@ -160,9 +166,16 @@ def rebalance():
             continue
 
         if diff_krw > 0:
-            # 매수: 순수 투자금 확보를 위해
-            gross_krw = diff_krw / (1 - FEE_RATE)
+            # 매수: 순수 투자금(diff_krw)과 수수료를 포함해 전체 지출이 cash를 넘지 않도록 조정
+            # gross_krw: 실제 구매금액
+            gross_krw = diff_krw / (1 + FEE_RATE)
             diff_qty = gross_krw / price
+
+            # 주문 수량 단위에 맞춰 내림
+            unit = ORDER_UNITS.get(asset)
+            if unit and diff_qty != 0:
+                diff_qty = math.floor(diff_qty / unit) * unit
+
             action = "BUY"
             fee = gross_krw * FEE_RATE
         else:
@@ -170,6 +183,12 @@ def rebalance():
             gross_net = -diff_krw
             gross_krw = gross_net / (1 - FEE_RATE)
             diff_qty = - (gross_krw / price)
+
+            # 주문 수량 단위에 맞춰 내림
+            unit = ORDER_UNITS.get(asset)
+            if unit and diff_qty != 0:
+                diff_qty = math.floor(abs(diff_qty) / unit) * unit * (-1 if diff_qty < 0 else 1)
+
             action = "SELL"
             fee = gross_krw * FEE_RATE
 
@@ -214,8 +233,10 @@ def rebalance():
         diff_qty = act["diff_qty"]; price = act["price"]
         diff_krw = act["diff_krw"]; fee = act["fee"]
 
+        # BUY: 실제로는 gross_krw + fee 만큼 현금 차감
+        gross_krw = diff_krw / (1 + FEE_RATE)
         quantities[asset] += diff_qty
-        cash -= (diff_krw / (1 - FEE_RATE))  # 총 지출 반영
+        cash -= (gross_krw + fee)  # 총 지출 반영 (구매금액 + 수수료)
 
         print(f"  {t}: BUY {abs(diff_qty):.6f} units @ {price:,.0f} KRW ({diff_krw:,.0f} KRW) Fee: {fee:,.0f} KRW")
         records.append({
