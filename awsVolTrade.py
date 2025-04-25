@@ -128,6 +128,7 @@ def rebalance():
     # 현재 보유 수량 및 현금 불러오기
     quantities = {t.split('-',1)[1]: state.get(t, 0.0) for t in TICKERS}
     cash = state.get("KRW", 0.0)
+    cash = 100000
 
     # 실시간 가격 조회 및 포트폴리오 가치 계산
     prices = {t: upbit.get_current_price(t) for t in TICKERS}
