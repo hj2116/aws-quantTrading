@@ -234,12 +234,13 @@ def rebalance():
             max_gross = cash/(1+FEE_RATE)
             max_qty = math.floor(max_gross/get_tick_price(prices[t])/ORDER_UNITS[asset])*ORDER_UNITS[asset]
             if qty > max_qty:
-                print(f"  ⚠️ BUY capped {qty:.6f} → {max_qty:.6f}")
+                print(f" BUY capped {qty:.6f} → {max_qty:.6f}")
                 qty = max_qty
             if qty <= 0:
                 continue
             spend = qty * get_tick_price(prices[t])
             params = {"market": t, "side": "bid", "ord_type": "price", "price": str(int(spend))}
+            intended_qty = qty
             resp = place_order(params)
             oid = resp.get("uuid")
             print(f"  {t}: BUY order submitted, uuid={oid}")
@@ -250,6 +251,38 @@ def rebalance():
                 state_s = status.get("state")
                 if state_s in ("done","cancel"):
                     print(f"  BUY {oid} {state_s}")
+                    executed = float(status.get("executed_volume",0))
+                    if state_s == "cancel" or executed < intended_qty:
+                        # compute leftover quantity
+                        leftover_qty = intended_qty - executed
+                        # truncate to unit
+                        unit = ORDER_UNITS.get(asset)
+                        if unit:
+                            leftover_qty = math.floor(leftover_qty / unit) * unit
+                        if leftover_qty > 0:
+                            print(f" Retrying BUY {t}: {leftover_qty:.6f} units")
+                            # place retry order
+                            retry_spend = leftover_qty * get_tick_price(prices[t])
+                            retry_params = {
+                                "market": t,
+                                "side": "bid",
+                                "ord_type": "price",
+                                "price": str(int(retry_spend))
+                            }
+                            retry_resp = place_order(retry_params)
+                            retry_id = retry_resp.get("uuid")
+                            print(f"  {t}: Retry BUY order submitted, uuid={retry_id}")
+                            # poll retry order to completion
+                            while True:
+                                retry_status = get_order_status(retry_id)
+                                if retry_status.get("state") in ("done","cancel"):
+                                    break
+                                time.sleep(1)
+                            # update executed and fee from retry status
+                            exec2 = float(retry_status.get("executed_volume",0))
+                            fee2  = float(retry_status.get("paid_fee",0))
+                            quantities[asset] += exec2
+                            cash -= exec2 * float(retry_status.get("price",0)) + fee2
                     break
                 time.sleep(1)
             # record buy results
